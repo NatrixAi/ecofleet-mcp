@@ -11,6 +11,7 @@ Authentication via environment variables:
   ECOFLEET_BASE_URL  - base URL (default: https://app.ecofleet.com/seeme/services)
 """
 
+import asyncio
 import json
 import os
 from typing import Optional, List, Dict, Any
@@ -26,7 +27,7 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("ecofleet_mcp")
 
-DEFAULT_BASE_URL = "https://app.ecofleet.com/seeme/services"
+DEFAULT_BASE_URL = "https://app.ecofleet.com/seeme"
 
 
 def _creds() -> tuple[str, str]:
@@ -41,22 +42,70 @@ def _creds() -> tuple[str, str]:
 # Shared HTTP helpers
 # ─────────────────────────────────────────────
 
+# Минимальная задержка между запросами — не более 1 req/sec (требование EcoFleet API)
+_RATE_LIMIT_DELAY = 1.1  # секунд
+
 async def _get(path: str, params: Dict[str, Any] = {}) -> Any:
     api_key, base_url = _creds()
-    all_params = {"apikey": api_key, **{k: v for k, v in params.items() if v is not None}}
+    all_params = {"key": api_key, "json": 1, **{k: v for k, v in params.items() if v is not None}}
+    await asyncio.sleep(_RATE_LIMIT_DELAY)
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.get(f"{base_url}{path}", params=all_params)
+        if r.status_code == 500:
+            try:
+                body = r.json()
+                msg = body.get("errormessage") or "Internal server error"
+            except Exception:
+                msg = "Internal server error"
+            raise ValueError(f"Error 500: {msg}")
         r.raise_for_status()
-        return r.json()
+        return _unwrap(r.json())
 
 
 async def _post(path: str, body: Dict[str, Any] = {}, params: Dict[str, Any] = {}) -> Any:
     api_key, base_url = _creds()
-    all_params = {"apikey": api_key, **{k: v for k, v in params.items() if v is not None}}
+    all_params = {"key": api_key, "json": 1, **{k: v for k, v in params.items() if v is not None}}
+    await asyncio.sleep(_RATE_LIMIT_DELAY)
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(f"{base_url}{path}", params=all_params, json=body)
+        if r.status_code == 500:
+            try:
+                body_json = r.json()
+                msg = body_json.get("errormessage") or "Internal server error"
+            except Exception:
+                msg = "Internal server error"
+            raise ValueError(f"Error 500: {msg}")
         r.raise_for_status()
-        return r.json()
+        return _unwrap(r.json())
+
+
+def _flatten_xml(data: Any) -> Any:
+    """Recursively flatten EcoFleet XML-to-JSON artifacts (___xmlNodeValues)."""
+    if isinstance(data, dict):
+        if "___xmlNodeValues" in data:
+            result = []
+            for item in data["___xmlNodeValues"]:
+                keys = [k for k in item if not k.startswith("___")]
+                result.append(item[keys[0]] if len(keys) == 1 else item)
+            return result
+        # Single-key dict wrapping xmlNodeValues (e.g. {"tasks": {___xmlNodeValues: [...]}})
+        non_meta = [k for k in data if not k.startswith("___")]
+        if len(non_meta) == 1:
+            inner = data[non_meta[0]]
+            if isinstance(inner, dict) and "___xmlNodeValues" in inner:
+                return _flatten_xml(inner)
+    return data
+
+
+def _unwrap(data: Any) -> Any:
+    """Unwrap standard EcoFleet API envelope: {"status": 0, "response": ...}"""
+    if isinstance(data, dict) and "response" in data:
+        status = data.get("status", 0)
+        if status != 0:
+            msg = data.get("errormessage") or data.get("error") or f"status={status}"
+            raise ValueError(f"EcoFleet API error: {msg}")
+        return _flatten_xml(data["response"])
+    return data
 
 
 def _error(e: Exception) -> str:
@@ -78,6 +127,9 @@ def _error(e: Exception) -> str:
     if isinstance(e, httpx.TimeoutException):
         return "Error: Request timed out after 30s."
     if isinstance(e, ValueError):
+        msg = str(e)
+        if msg.startswith("EcoFleet API error"):
+            return msg
         return f"Config error: {e}"
     return f"Error: {type(e).__name__}: {e}"
 
@@ -214,8 +266,8 @@ async def ecofleet_get_vehicle_trips(params: GetVehicleTripsInput) -> str:
     try:
         data = await _get("/Api/Vehicles/getTrips", {
             "objectId": params.object_id,
-            "from": params.date_from,
-            "till": params.date_to,
+            "begTimestamp": params.date_from,
+            "endTimestamp": params.date_to,
         })
         if params.response_format == ResponseFormat.JSON:
             return _fmt(data)
@@ -301,8 +353,8 @@ async def ecofleet_assign_driver(params: AssignDriverInput) -> str:
 # ═══════════════════════════════════════════════════════════
 
 class ListTasksInput(PaginationMixin):
-    date_from: Optional[str] = Field(default=None, description="Filter tasks from date YYYY-MM-DD")
-    date_to: Optional[str] = Field(default=None, description="Filter tasks to date YYYY-MM-DD")
+    date_from: Optional[str] = Field(default=None, description="Filter tasks from datetime, format 'YYYY-MM-DD HH:MM:SS' (e.g. '2026-01-10 00:00:00')")
+    date_to: Optional[str] = Field(default=None, description="Filter tasks to datetime, format 'YYYY-MM-DD HH:MM:SS' (e.g. '2026-01-14 23:59:59')")
     status: Optional[str] = Field(default=None, description="Task status filter (e.g. 'new', 'in_progress', 'done')")
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
@@ -326,9 +378,9 @@ async def ecofleet_list_tasks(params: ListTasksInput) -> str:
     try:
         p: Dict[str, Any] = {"limit": params.limit, "offset": params.offset}
         if params.date_from:
-            p["from"] = params.date_from
+            p["begTimestamp"] = params.date_from
         if params.date_to:
-            p["till"] = params.date_to
+            p["endTimestamp"] = params.date_to
         if params.status:
             p["status"] = params.status
         data = await _get("/Api/Tasks/get", p)
@@ -788,7 +840,12 @@ async def ecofleet_list_reports(params: ListReportsInput) -> str:
     """List all available reports in EcoFleet.
 
     Fetches from GET /Api/Reports/listReports.
-    Returns report IDs and names to use with ecofleet_get_report.
+    Returns report IDs and names.
+
+    REPORTS WORKFLOW (3 steps):
+    1. ecofleet_list_reports → get report IDs
+    2. ecofleet_get_report_conf(report_id) → get exact parameters for that report
+    3. ecofleet_get_report(report_id, ...) → get actual data with correct params
 
     Returns:
         str: List of available report names and IDs.
@@ -810,13 +867,74 @@ async def ecofleet_list_reports(params: ListReportsInput) -> str:
         return _error(e)
 
 
+class GetReportConfInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    report_id: str = Field(..., description="Report ID to get configuration for (e.g. 'triptype', 'trips')")
+
+
+@mcp.tool(
+    name="ecofleet_get_report_conf",
+    annotations={"title": "Get EcoFleet Report Configuration", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+async def ecofleet_get_report_conf(params: GetReportConfInput) -> str:
+    """Get input/output configuration for a specific EcoFleet report.
+
+    ALWAYS call this before ecofleet_get_report to discover:
+    - Exact parameter names required for this report
+    - Parameter types (date, array_of_int, integer, string)
+    - Date format requirements
+    - Output columns and their data types
+
+    Fetches from GET /Api/Reports/getReportConf.
+
+    Args:
+        params: report_id
+
+    Returns:
+        str: Report parameter schema and output column definitions.
+    """
+    try:
+        data = await _get("/Api/Reports/getReportConf", {"id": params.report_id})
+        title = data.get("title", params.report_id) if isinstance(data, dict) else params.report_id
+        lines = [f"## Report Config: {title} (id: {params.report_id})", ""]
+
+        if isinstance(data, dict):
+            params_list = data.get("parameters", [])
+            if params_list:
+                lines.append("### Input Parameters")
+                for p in params_list:
+                    name = p.get("name", "")
+                    ptype = p.get("type", "")
+                    fmt = p.get("format", "")
+                    nullable = p.get("allowNull", True)
+                    fmt_str = f", format: `{fmt}`" if fmt else ""
+                    null_str = " (optional)" if nullable else " (required)"
+                    lines.append(f"- `{name}` — type: `{ptype}`{fmt_str}{null_str}")
+                lines.append("")
+
+            output_list = data.get("output", [])
+            if output_list:
+                lines.append("### Output Columns")
+                for col in output_list:
+                    ctitle = col.get("title", "")
+                    cdata = col.get("data", "")
+                    ctype = col.get("type", "")
+                    unit = col.get("unit", "")
+                    unit_str = f" [{unit}]" if unit else ""
+                    lines.append(f"- `{cdata}` — {ctitle} ({ctype}{unit_str})")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return _error(e)
+
+
 class GetReportInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    report_id: str = Field(..., description="Report ID (use ecofleet_list_reports to get IDs)")
-    date_from: str = Field(..., description="Report start date YYYY-MM-DD")
-    date_to: str = Field(..., description="Report end date YYYY-MM-DD")
-    object_id: Optional[str] = Field(default=None, description="Vehicle ID to filter report for specific vehicle")
-    format: Optional[str] = Field(default="json", description="Output format: 'json', 'csv', 'html', 'pdf', 'xls'")
+    report_id: str = Field(..., description="Report ID from ecofleet_list_reports (e.g. 'triptype', 'trips', 'places')")
+    date_from: str = Field(..., description="Start datetime in format 'YYYY-MM-DD HH:MM:SS' (e.g. '2026-03-04 00:00:00')")
+    date_to: str = Field(..., description="End datetime in format 'YYYY-MM-DD HH:MM:SS' (e.g. '2026-03-04 23:59:59')")
+    object_ids: Optional[List[int]] = Field(default=None, description="List of vehicle IDs to filter (e.g. [23779, 23780]). Use ecofleet_list_vehicles to get IDs.")
+    format: Optional[str] = Field(default=None, description="Output format: 'csv', 'xls', 'html', 'pdf'. Omit for JSON (default).")
 
 
 @mcp.tool(
@@ -826,25 +944,39 @@ class GetReportInput(BaseModel):
 async def ecofleet_get_report(params: GetReportInput) -> str:
     """Get report data from EcoFleet for a specific period and report type.
 
+    IMPORTANT: Two-step workflow required:
+    1. Call ecofleet_get_report_conf with the report_id to discover exact parameters
+    2. Call this tool with the correct parameters from step 1
+
     Fetches from GET /Api/Reports/getReport.
-    Supports JSON, CSV, XLS, HTML, and PDF output formats.
+    Dates must be in 'YYYY-MM-DD HH:MM:SS' format (not just YYYY-MM-DD).
+    Vehicle IDs are passed as array: objectIds[] (not single objectId).
 
     Args:
-        params: report_id, date_from, date_to, object_id (optional), format
+        params: report_id, date_from, date_to, object_ids (list, optional), format
 
     Returns:
-        str: Report data in the requested format.
+        str: Report data in JSON (default) or requested format.
     """
     try:
         p: Dict[str, Any] = {
-            "reportId": params.report_id,
-            "from": params.date_from,
-            "till": params.date_to,
-            "format": params.format,
+            "id": params.report_id,
+            "begTimestamp": params.date_from,
+            "endTimestamp": params.date_to,
         }
-        if params.object_id:
-            p["objectId"] = params.object_id
+        if params.object_ids:
+            for oid in params.object_ids:
+                p.setdefault("objectIds[]", [])
+                if not isinstance(p["objectIds[]"], list):
+                    p["objectIds[]"] = [p["objectIds[]"]]
+                p["objectIds[]"].append(oid)
+        if params.format:
+            p["format"] = params.format
         data = await _get("/Api/Reports/getReport", p)
+        if isinstance(data, dict) and "data" in data:
+            rows = data["data"]
+            title = data.get("title", params.report_id)
+            return f"## {title}\n\n" + _fmt(rows)
         return _fmt(data)
     except Exception as e:
         return _error(e)

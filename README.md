@@ -1,11 +1,11 @@
 # EcoFleet MCP Server
 
-MCP сервер для работы с EcoFleet (fleet management) через Claude Desktop.
+MCP сервер для работы с [EcoFleet](https://app.ecofleet.com) (fleet management) через Claude Desktop.  
 Даёт Claude доступ к транспорту, задачам, клиентам, логбуку, расписаниям и отчётам.
 
 ---
 
-## Установка (для клиента)
+## Быстрый старт
 
 ### 1. Клонировать репозиторий
 
@@ -23,32 +23,33 @@ pip install -r requirements.txt
 ### 3. Добавить в конфиг Claude Desktop
 
 Открыть файл:
-```
-~/Library/Application Support/Claude/claude_desktop_config.json
-```
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
 Добавить в секцию `mcpServers`:
 
 ```json
 "ecofleet": {
   "command": "python3",
-  "args": ["/путь/до/ecofleet-mcp/server.py"],
+  "args": ["/абсолютный/путь/до/ecofleet-mcp/server.py"],
   "env": {
     "ECOFLEET_API_KEY": "ВАШ_API_КЛЮЧ",
-    "ECOFLEET_BASE_URL": "https://app.ecofleet.com/seeme/services"
+    "ECOFLEET_BASE_URL": "https://app.ecofleet.com/seeme"
   }
 }
 ```
+
+> ⚠️ **ВАЖНО:** `ECOFLEET_BASE_URL` должен быть `https://app.ecofleet.com/seeme` — **без `/services` на конце**.
 
 Где взять ключ: **app.ecofleet.com → Профиль → Settings → API key**
 
 ### 4. Перезапустить Claude Desktop
 
-После перезапуска в Claude появятся 43 инструмента EcoFleet.
+После перезапуска в Claude появятся инструменты EcoFleet.
 
 ---
 
-## Инструменты (43 шт.)
+## Инструменты
 
 ### Vehicles (5)
 - `ecofleet_list_vehicles` — список всех транспортных средств
@@ -58,7 +59,7 @@ pip install -r requirements.txt
 - `ecofleet_assign_driver` — назначить водителя на ТС
 
 ### Tasks/Orders (5)
-- `ecofleet_list_tasks` — список задач с фильтрацией
+- `ecofleet_list_tasks` — список задач с фильтрацией по дате
 - `ecofleet_get_task` — детали задачи
 - `ecofleet_create_task` — создать задачу
 - `ecofleet_update_task` — обновить задачу
@@ -76,11 +77,12 @@ pip install -r requirements.txt
 - `ecofleet_lock_trip` — заблокировать поездку
 - `ecofleet_reject_trip` — отклонить поездку
 
-### Reports (2)
+### Reports (3)
 - `ecofleet_list_reports` — список доступных отчётов
+- `ecofleet_get_report_conf` — параметры конкретного отчёта (**обязательный шаг перед get_report**)
 - `ecofleet_get_report` — получить данные отчёта (JSON/CSV/XLS/PDF)
 
-### WorkSchedule (5)
+### Work Schedule (5)
 - `ecofleet_get_work_schedule` — расписание сотрудника
 - `ecofleet_get_all_schedules` — расписание всех сотрудников
 - `ecofleet_add_schedule` — добавить смену
@@ -112,13 +114,70 @@ pip install -r requirements.txt
 
 ### Messages/Garmin (3)
 - `ecofleet_send_text_message` — отправить текст на Garmin устройство
-- `ecofleet_send_stop_message` — отправить маршрутную точку
+- `ecofleet_send_stop_message` — отправить маршрутную точку на Garmin
 - `ecofleet_get_message_status` — статус доставки сообщения
 
 ---
 
-## Примечание по аутентификации
+## Критические особенности API (читать обязательно)
 
-Сервер использует `apikey` как query-параметр. Если ваш аккаунт EcoFleet
-использует другой метод аутентификации — измените переменную `ECOFLEET_BASE_URL`
-или обратитесь к разработчику для настройки.
+### Формат дат — везде `YYYY-MM-DD HH:MM:SS`
+
+Все инструменты принимающие период используют:
+- `date_from`: `"2026-01-10 00:00:00"`
+- `date_to`: `"2026-01-14 23:59:59"`
+
+> ❌ Не работает: `"2026-01-10"` (без времени) для большинства endpoint-ов
+
+### Отчёты — обязательный 3-шаговый workflow
+
+```
+1. ecofleet_list_reports        → получить список ID отчётов
+2. ecofleet_get_report_conf     → узнать точные параметры отчёта
+3. ecofleet_get_report          → запросить данные
+```
+
+**Шаг 2 нельзя пропускать.** Без него запрос вернёт `"No rights for this report"` — это не проблема прав, это неверные параметры.
+
+Параметры `ecofleet_get_report`:
+
+| Что передавать | Правильно | Неправильно |
+|---------------|-----------|-------------|
+| ID отчёта | `id` | `reportId` |
+| Начало периода | `begTimestamp` | `from` |
+| Конец периода | `endTimestamp` | `till` |
+| Список ТС | `objectIds[]` (массив int) | `objectId` (строка) |
+| Формат JSON | не указывать | `format=json` (не существует) |
+
+### Rate limit
+
+API EcoFleet: **не более 1 запроса в секунду**.  
+Задержка 1.1 сек уже встроена в код — ничего настраивать не нужно.
+
+### Известные ограничения
+
+| Отчёт | Статус | Причина |
+|-------|--------|---------|
+| `customLT1` | ❌ HTTP 500 | Только для лесохозяйственных организаций ("Urėdijos") |
+| `customLT2` | ❌ HTTP 500 | То же |
+| `trackSummary` | ⚠️ Частично | Требует одиночный `objectId`, а не массив |
+
+### Поле Sandėrio ID в задачах
+
+Отчёт `newTasksReport` содержит поле `4474-18016` — это ID сделки в Kommo CRM (Sandėrio ID).  
+Позволяет связывать задачи EcoFleet со сделками Kommo без доступа к WebApp.
+
+---
+
+## API документация
+
+`https://app.ecofleet.com/services/apidoc/apidoc`
+
+> Документация открывается только из браузера с активной сессией EcoFleet.
+
+---
+
+## История изменений
+
+- **04.03.2026** — Исправлены параметры `ecofleet_list_tasks` (`begTimestamp`/`endTimestamp` вместо `from`/`till`); добавлен `ecofleet_get_report_conf`; исправлены параметры `ecofleet_get_report`; добавлен rate limit 1.1 сек; исправлена обработка HTTP 500
+- **Начальная версия** — базовый набор инструментов
