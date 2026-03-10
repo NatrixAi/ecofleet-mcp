@@ -369,6 +369,17 @@ async def ecofleet_list_tasks(params: ListTasksInput) -> str:
     Fetches task list with pagination.
     Returns task ID, title, status, assigned driver, and time window.
 
+    TWO WAYS TO VIEW TASK HISTORY:
+    1. ecofleet_list_tasks — basic info (id, name, status, driver).
+       Use date_from/date_to in format 'YYYY-MM-DD HH:MM:SS' to filter by period.
+       Example: date_from='2026-01-10 00:00:00', date_to='2026-01-14 23:59:59'
+
+    2. ecofleet_get_report(report_id='newTasksReport') — extended data including
+       Sandėrio ID (field '4474-18016' = Kommo CRM deal ID).
+       Use same date format for date_from/date_to.
+
+    IMPORTANT: date_from/date_to use 'YYYY-MM-DD HH:MM:SS' format (not just YYYY-MM-DD).
+
     Args:
         params: date_from, date_to, status, limit, offset
 
