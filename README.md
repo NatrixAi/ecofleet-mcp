@@ -7,6 +7,20 @@ MCP сервер для работы с [EcoFleet](https://app.ecofleet.com) (fl
 
 ## Быстрый старт
 
+### 0. Предварительные требования
+
+Нужен Python 3.9+. Проверить:
+
+| ОС | Команда проверки | Ожидаемый вывод |
+|----|-----------------|-----------------|
+| macOS / Linux | `python3 --version` | `Python 3.9.x` или выше |
+| Windows | `python --version` или `py --version` | `Python 3.9.x` или выше |
+
+> Если Python не установлен: [python.org/downloads](https://www.python.org/downloads/)  
+> На Windows при установке обязательно поставить галочку **"Add Python to PATH"**
+
+---
+
 ### 1. Клонировать репозиторий
 
 ```bash
@@ -14,24 +28,58 @@ git clone https://github.com/NatrixAi/ecofleet-mcp.git
 cd ecofleet-mcp
 ```
 
+---
+
 ### 2. Установить зависимости
 
+**macOS / Linux:**
+```bash
+pip3 install -r requirements.txt
+```
+
+**Windows:**
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Добавить в конфиг Claude Desktop
+Проверить успешность: `pip show mcp` — должна выдать информацию о пакете.
 
-Открыть файл:
+---
+
+### 3. Узнать путь к файлу server.py
+
+Нужен **абсолютный** путь — он понадобится в конфиге.
+
+**macOS / Linux:**
+```bash
+pwd  # выполнить из папки ecofleet-mcp
+# Результат: /Users/username/ecofleet-mcp
+# Полный путь: /Users/username/ecofleet-mcp/server.py
+```
+
+**Windows (PowerShell):**
+```powershell
+pwd  # выполнить из папки ecofleet-mcp
+# Результат: C:\Users\username\ecofleet-mcp
+# Полный путь: C:\Users\username\ecofleet-mcp\server.py
+```
+
+---
+
+### 4. Добавить в конфиг Claude Desktop
+
+Открыть файл конфига:
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux:** `~/.config/Claude/claude_desktop_config.json`
 
 Добавить в секцию `mcpServers`:
 
+**macOS / Linux:**
 ```json
 "ecofleet": {
   "command": "python3",
-  "args": ["/абсолютный/путь/до/ecofleet-mcp/server.py"],
+  "args": ["/Users/username/ecofleet-mcp/server.py"],
   "env": {
     "ECOFLEET_API_KEY": "ВАШ_API_КЛЮЧ",
     "ECOFLEET_BASE_URL": "https://app.ecofleet.com/seeme"
@@ -39,13 +87,33 @@ pip install -r requirements.txt
 }
 ```
 
-> ⚠️ **ВАЖНО:** `ECOFLEET_BASE_URL` должен быть `https://app.ecofleet.com/seeme` — **без `/services` на конце**.
+**Windows:**
+```json
+"ecofleet": {
+  "command": "python",
+  "args": ["C:\\Users\\username\\ecofleet-mcp\\server.py"],
+  "env": {
+    "ECOFLEET_API_KEY": "ВАШ_API_КЛЮЧ",
+    "ECOFLEET_BASE_URL": "https://app.ecofleet.com/seeme"
+  }
+}
+```
 
-Где взять ключ: **app.ecofleet.com → Профиль → Settings → API key**
+> ⚠️ **ВАЖНО — BASE_URL:** должен быть `https://app.ecofleet.com/seeme` — **без `/services` на конце**. С `/services` — не работает.
 
-### 4. Перезапустить Claude Desktop
+> ⚠️ **ВАЖНО — Windows пути:** обратные слеши нужно удваивать: `C:\\Users\\` а не `C:\Users\`
 
-После перезапуска в Claude появятся инструменты EcoFleet.
+> ⚠️ **ВАЖНО — Windows команда:** использовать `"python"` или `"py"`, а не `"python3"` (команда `python3` на Windows обычно не существует)
+
+Где взять API ключ: **app.ecofleet.com → Профиль → Settings → API key**
+
+---
+
+### 5. Перезапустить Claude Desktop
+
+После перезапуска в Claude появятся инструменты EcoFleet (около 43 инструментов).
+
+**Проверка:** попроси Claude `ecofleet_list_vehicles` — должен вернуть список транспортных средств.
 
 ---
 
