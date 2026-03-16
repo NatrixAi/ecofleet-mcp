@@ -8,7 +8,59 @@ work schedules, people, expenses, organization, and messaging.
 
 Authentication via environment variables:
   ECOFLEET_API_KEY   - your EcoFleet API key
-  ECOFLEET_BASE_URL  - base URL (default: https://app.ecofleet.com/seeme/services)
+  ECOFLEET_BASE_URL  - base URL (default: https://app.ecofleet.com/seeme)
+                       WARNING: must NOT end with /services — just /seeme
+
+═══════════════════════════════════════════════════════════════
+CRITICAL KNOWLEDGE (learned through debugging — read before use)
+═══════════════════════════════════════════════════════════════
+
+DATE FORMAT — everywhere 'YYYY-MM-DD HH:MM:SS':
+  ✅ "2026-01-10 00:00:00"    ❌ "2026-01-10" (ignored by most endpoints)
+
+DATE PARAMETER NAMES by endpoint:
+  ecofleet_list_tasks           → begTimestamp / endTimestamp
+  ecofleet_get_report           → begTimestamp / endTimestamp
+  ecofleet_get_vehicle_trips    → begTimestamp / endTimestamp
+  ecofleet_get_logbook          → from / till   (exception!)
+  ecofleet_get_vehicle_raw_data → from / till   (exception!)
+
+HOW TO FIND HISTORICAL TASKS (two methods):
+  Method 1 — basic (id, name, status, driver):
+    ecofleet_list_tasks(date_from="2026-01-10 00:00:00", date_to="2026-01-14 23:59:59")
+
+  Method 2 — extended data incl. custom fields and Kommo CRM link:
+    ecofleet_get_report(report_id="newTasksReport",
+                        date_from="2026-01-10 00:00:00",
+                        date_to="2026-01-14 23:59:59")
+
+CUSTOM FIELDS IN TASKS (newTasksReport):
+  Field "4474-18016" = Sandėrio ID — Kommo CRM deal ID linked to this task.
+  This is the key to connecting EcoFleet tasks <-> Kommo CRM deals.
+  Other custom fields may appear in the report — check field names in output.
+
+REPORTS WORKFLOW (3 mandatory steps — cannot skip step 2):
+  1. ecofleet_list_reports       → get list of report IDs
+  2. ecofleet_get_report_conf    → get exact parameters for chosen report
+  3. ecofleet_get_report         → request data with correct params
+  Skipping step 2 causes "No rights for this report" — not a permissions error,
+  it means wrong parameters were sent.
+
+REPORT PARAMETERS:
+  ✅ id=           ❌ reportId=
+  ✅ begTimestamp= ❌ from= / till=
+  ✅ objectIds[]   ❌ objectId (string)
+  ✅ omit format   ❌ format=json (does not exist; use csv/xls/html/pdf only)
+
+KNOWN BROKEN REPORTS (HTTP 500, server-side):
+  customLT1, customLT2 — only for forestry org ("Uredijos"), not available here.
+
+PARTIAL SUPPORT:
+  trackSummary — needs single objectId (int), not objectIds[] array.
+
+RATE LIMIT:
+  Max 1 request/second. Built-in delay of 1.1s in _get() and _post().
+═══════════════════════════════════════════════════════════════
 """
 
 import asyncio
@@ -853,10 +905,21 @@ async def ecofleet_list_reports(params: ListReportsInput) -> str:
     Fetches from GET /Api/Reports/listReports.
     Returns report IDs and names.
 
-    REPORTS WORKFLOW (3 steps):
+    REPORTS WORKFLOW (3 mandatory steps):
     1. ecofleet_list_reports → get report IDs
     2. ecofleet_get_report_conf(report_id) → get exact parameters for that report
     3. ecofleet_get_report(report_id, ...) → get actual data with correct params
+
+    USEFUL REPORT IDs:
+    - "newTasksReport" — task history with custom fields incl. Sandėrio ID
+      (field "4474-18016" = Kommo CRM deal ID). Best way to get extended task data.
+    - "trips"          — vehicle trip history
+    - "mileage"        — mileage per vehicle
+    - "fuelConsumption"— fuel consumption
+    - "driverScoring"  — driver behavior scoring
+
+    BROKEN (HTTP 500, not available for this account):
+    - "customLT1", "customLT2" — forestry org reports only
 
     Returns:
         str: List of available report names and IDs.
@@ -955,13 +1018,31 @@ class GetReportInput(BaseModel):
 async def ecofleet_get_report(params: GetReportInput) -> str:
     """Get report data from EcoFleet for a specific period and report type.
 
-    IMPORTANT: Two-step workflow required:
-    1. Call ecofleet_get_report_conf with the report_id to discover exact parameters
-    2. Call this tool with the correct parameters from step 1
+    MANDATORY WORKFLOW (3 steps):
+    1. ecofleet_list_reports       → get available report IDs
+    2. ecofleet_get_report_conf    → get exact parameters for the chosen report
+    3. THIS TOOL                   → request data with correct params
 
     Fetches from GET /Api/Reports/getReport.
-    Dates must be in 'YYYY-MM-DD HH:MM:SS' format (not just YYYY-MM-DD).
-    Vehicle IDs are passed as array: objectIds[] (not single objectId).
+
+    PARAMETER RULES (wrong params cause "No rights" error — not a permissions issue):
+    - report_id: use "id" field from list_reports (e.g. "newTasksReport", "trips")
+    - date_from/date_to: must be 'YYYY-MM-DD HH:MM:SS' (not just YYYY-MM-DD)
+    - object_ids: list of int vehicle IDs e.g. [23779]. NOT a string.
+    - format: omit for JSON (default). Use "csv"/"xls"/"html"/"pdf" to download.
+      WARNING: format="json" does NOT exist — omit entirely for JSON output.
+
+    SPECIAL REPORT — newTasksReport (task history with custom fields):
+    - Returns all tasks for the period with extended data
+    - Field "4474-18016" in output = Sandėrio ID (Kommo CRM deal ID)
+    - This is the primary way to link EcoFleet tasks <-> Kommo CRM deals
+    - Example: ecofleet_get_report(report_id="newTasksReport",
+                                   date_from="2026-01-10 00:00:00",
+                                   date_to="2026-01-14 23:59:59")
+
+    KNOWN ISSUE — trackSummary:
+    - Requires single objectId (int), not objectIds[] array.
+    - Use object_ids=[23779] but be aware this report behaves differently.
 
     Args:
         params: report_id, date_from, date_to, object_ids (list, optional), format
